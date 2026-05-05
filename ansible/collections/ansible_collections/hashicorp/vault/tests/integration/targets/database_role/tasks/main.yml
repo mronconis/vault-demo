@@ -1,0 +1,295 @@
+---
+# Integration tests for database_role module
+# Tests dynamic role management with token authentication
+
+- name: Run database_role tests
+  module_defaults:
+    group/hashicorp.vault.vault:
+      url: "{{ vault_url }}"
+      namespace: "{{ vault_namespace }}"
+      auth_method: "token"
+      token: "{{ vault_token_from_setup_auth_token }}"
+      vault_approle_path: "{{ vault_approle_path }}"
+  vars:
+    test_role_name: "readonly-{{ vault_resource_suffix }}"
+    test_db_connection: "mysql-{{ vault_resource_suffix }}"
+    test_creation_statements:
+      - "{% raw %}CREATE ROLE '{{name}}' WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}';{% endraw %}"
+      - "{% raw %}GRANT SELECT ON ALL TABLES IN SCHEMA public TO '{{name}}';{% endraw %}"
+    test_revocation_statements:
+      - "{% raw %}DROP ROLE IF EXISTS '{{name}}';{% endraw %}"
+  block:
+    # Setup: Create a test database connection for roles to reference
+    - name: Create test database connection
+      hashicorp.vault.database_connection:
+        database_mount_path: "{{ vault_database_mount_path }}"
+        name: "{{ test_db_connection }}"
+        plugin_name: "mysql-database-plugin"
+        connection_url: "{% raw %}mysql://{{username}}:{{password}}@localhost:3306/testdb{% endraw %}"
+        username: "testuser"
+        password: "testpass"
+        allowed_roles: "*"
+        verify_connection: false
+      register: setup_connection
+
+    # Create database role - missing required parameters
+    - name: Try to create role without required db_name parameter
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        creation_statements: "{{ test_creation_statements }}"
+      ignore_errors: true
+      register: create_missing_params
+
+    - name: Ensure task failed due to missing db_name
+      ansible.builtin.assert:
+        that:
+          - create_missing_params is failed
+          - "'state is present but all of the following are missing: db_name' in create_missing_params.msg"
+
+    # Create database role (check mode)
+    - name: Create database role (check mode)
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        db_name: "{{ test_db_connection }}"
+        creation_statements: "{{ test_creation_statements }}"
+        default_ttl: 3600
+        max_ttl: 86400
+      check_mode: true
+      register: create_check_mode
+
+    - name: Read role to verify it doesn't exist yet
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+      register: role_info
+
+    - name: Validate that module reported change while role was not created
+      ansible.builtin.assert:
+        that:
+          - create_check_mode is changed
+          - role_info.roles == []
+
+    # Create database role
+    - name: Create database role
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        db_name: "{{ test_db_connection }}"
+        creation_statements: "{{ test_creation_statements }}"
+        default_ttl: 3600
+        max_ttl: 86400
+      register: create_role
+
+    - name: Read role configuration
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+      register: role_info
+
+    - name: Validate that module reported change and role was created
+      ansible.builtin.assert:
+        that:
+          - create_role is changed
+          - role_info.roles | length == 1
+          - role_info.roles[0].db_name == test_db_connection
+          - role_info.roles[0].default_ttl == 3600
+          - role_info.roles[0].max_ttl == 86400
+
+    # Read role info in check mode
+    - name: Read role in check mode
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+      check_mode: true
+      register: role_info_check_mode
+
+    - name: Validate check mode returns same data
+      ansible.builtin.assert:
+        that:
+          - role_info_check_mode.roles == role_info.roles
+          - role_info_check_mode is not changed
+
+    # List all dynamic roles (without role_name parameter)
+    - name: List all dynamic roles
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+      register: all_roles
+
+    - name: Validate that our test role appears in the list
+      ansible.builtin.assert:
+        that:
+          - all_roles.roles | length > 0
+          - all_roles.roles | selectattr('name', 'equalto', test_role_name) | list | length == 1
+          - all_roles is not changed
+
+    # List all dynamic roles in check mode
+    - name: List all dynamic roles in check mode
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+      check_mode: true
+      register: all_roles_check_mode
+
+    - name: Validate check mode returns same data for list
+      ansible.builtin.assert:
+        that:
+          - all_roles_check_mode.roles == all_roles.roles
+          - all_roles_check_mode is not changed
+
+    # Create database role (idempotency)
+    - name: Create database role again (idempotency)
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        db_name: "{{ test_db_connection }}"
+        creation_statements: "{{ test_creation_statements }}"
+        default_ttl: 3600
+        max_ttl: 86400
+      register: create_idempotency
+
+    - name: Validate that module is idempotent for creation
+      ansible.builtin.assert:
+        that:
+          - create_idempotency is not changed
+
+    # Update database role (check mode)
+    - name: Update database role with revocation statements (check mode)
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        db_name: "{{ test_db_connection }}"
+        creation_statements: "{{ test_creation_statements }}"
+        revocation_statements: "{{ test_revocation_statements }}"
+        default_ttl: 3600
+        max_ttl: 86400
+      check_mode: true
+      register: update_check_mode
+
+    - name: Read role configuration
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+      register: role_info
+
+    - name: Validate that module reported change while role was not updated
+      ansible.builtin.assert:
+        that:
+          - update_check_mode is changed
+          - role_info.roles[0].revocation_statements is not defined or role_info.roles[0].revocation_statements | length == 0
+
+    # Update database role
+    - name: Update database role with revocation statements
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        db_name: "{{ test_db_connection }}"
+        creation_statements: "{{ test_creation_statements }}"
+        revocation_statements: "{{ test_revocation_statements }}"
+        default_ttl: 3600
+        max_ttl: 86400
+      register: update_role
+
+    - name: Read role configuration
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+      register: role_info
+
+    - name: Validate that module reported change and role was updated
+      ansible.builtin.assert:
+        that:
+          - update_role is changed
+          - role_info.roles[0].revocation_statements | length == 1
+
+    # Update database role (idempotency)
+    - name: Update database role again (idempotency)
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        db_name: "{{ test_db_connection }}"
+        creation_statements: "{{ test_creation_statements }}"
+        revocation_statements: "{{ test_revocation_statements }}"
+        default_ttl: 3600
+        max_ttl: 86400
+      register: update_idempotency
+
+    - name: Validate that module is idempotent for update
+      ansible.builtin.assert:
+        that:
+          - update_idempotency is not changed
+
+    # Delete database role (check mode)
+    - name: Delete database role (check mode)
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        state: absent
+      check_mode: true
+      register: delete_check_mode
+
+    - name: Read role configuration
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+      register: role_info
+
+    - name: Validate that module reported change while role was not deleted
+      ansible.builtin.assert:
+        that:
+          - delete_check_mode is changed
+          - role_info.roles | length > 0
+
+    # Delete database role
+    - name: Delete database role
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        state: absent
+      register: delete_role
+
+    - name: Read role configuration
+      hashicorp.vault.database_role_info:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+      register: role_info
+
+    - name: Validate that module reported change and role was deleted
+      ansible.builtin.assert:
+        that:
+          - delete_role is changed
+          - role_info.roles == []
+
+    # Delete database role (idempotency)
+    - name: Delete database role again (idempotency)
+      hashicorp.vault.database_role:
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        state: absent
+      register: delete_idempotency
+
+    - name: Validate module idempotency for deletion
+      ansible.builtin.assert:
+        that:
+          - delete_idempotency is not changed
+
+  always:
+    - name: Cleanup - delete test role
+      hashicorp.vault.database_role:
+        url: "{{ vault_url }}"
+        namespace: "{{ vault_namespace }}"
+        token: "{{ vault_token_from_setup_auth_token }}"
+        mount_path: "{{ vault_database_mount_path }}"
+        role_name: "{{ test_role_name }}"
+        state: absent
+      ignore_errors: true
+
+    - name: Cleanup - delete test database connection
+      hashicorp.vault.database_connection:
+        url: "{{ vault_url }}"
+        namespace: "{{ vault_namespace }}"
+        token: "{{ vault_token_from_setup_auth_token }}"
+        database_mount_path: "{{ vault_database_mount_path }}"
+        name: "{{ test_db_connection }}"
+        state: absent
+      ignore_errors: true

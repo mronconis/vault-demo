@@ -1,0 +1,20 @@
+ui            = true
+cluster_addr  = "http://{{ vault_node_ip }}:{{ vault_cluster_port }}"
+api_addr      = "http://{{ vault_node_ip }}:{{ vault_api_port }}"
+disable_mlock = true
+
+listener "tcp" {
+  address     = "0.0.0.0:{{ vault_api_port }}"
+  tls_disable = 1
+}
+
+storage "raft" {
+  path    = "{{ vault_data_dir }}"
+  node_id = "{{ inventory_hostname }}"
+
+{% for node in vault_nodes %}
+  retry_join {
+    leader_api_addr = "http://{{ node.ip }}:{{ vault_api_port }}"
+  }
+{% endfor %}
+}

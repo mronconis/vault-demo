@@ -1,0 +1,74 @@
+---
+name: CI
+
+on: # yamllint disable-line rule:truthy
+  pull_request_target:
+    branches:
+      - main
+      - stable-*
+  workflow_dispatch:
+
+jobs:
+  run-integration-tests:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+    # If this Pull Request is coming from a fork, use the 'vault-integration' environment. Otherwise,  don't use any environment at all.
+    environment: ${{ github.event.pull_request.head.repo.fork && 'vault-integration' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ansible-version:
+          - stable-2.19
+          - stable-2.18
+          - devel
+        python-version:
+          - "3.12"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ansible-core (${{ matrix.ansible-version }})
+        run: python3 -m pip install https://github.com/ansible/ansible/archive/${{ matrix.ansible-version }}.tar.gz --disable-pip-version-check
+
+      - name: Install collection test dependencies
+        run: python3 -m pip install -r test-requirements.txt
+
+      - name: Build and install the collection
+        run: ansible-galaxy collection install . --force
+
+      - name: List all integration test targets
+        run: |
+          cd ~/.ansible/collections/ansible_collections/hashicorp/vault && \
+          ansible-test integration --list-targets || echo "No integration targets found"
+
+      - name: Check for integration test targets
+        id: check-targets
+        run: |
+          cd ~/.ansible/collections/ansible_collections/hashicorp/vault
+          if ansible-test integration --list-targets > /dev/null 2>&1; then
+            echo "has-targets=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-targets=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Render integration_config.yml from template
+        shell: bash
+        run: ansible -m ansible.builtin.template -a 'src=tests/integration/integration_config.yml.template dest=tests/integration/integration_config.yml' localhost # noqa: yaml[line-length]
+        working-directory: /home/runner/.ansible/collections/ansible_collections/hashicorp/vault
+        env:
+          VAULT_ADDR: "${{ secrets.VAULT_ADDR }}"
+          VAULT_NAMESPACE: "${{ vars.VAULT_NAMESPACE }}"
+          VAULT_APPROLE_ROLE_ID: "${{ secrets.VAULT_APPROLE_ROLE_ID }}"
+          VAULT_APPROLE_SECRET_ID: "${{ secrets.VAULT_APPROLE_SECRET_ID }}"
+
+      - name: Run integration tests
+        if: steps.check-targets.outputs.has-targets == 'true'
+        run: |
+          cd ~/.ansible/collections/ansible_collections/hashicorp/vault && \
+          ansible-test integration --python ${{ matrix.python-version }} --continue-on-error

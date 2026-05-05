@@ -1,0 +1,4 @@
+collections:
+  - name: hashicorp.vault
+    source: https://github.com/ansible-collections/hashicorp.vault.git
+    type: git

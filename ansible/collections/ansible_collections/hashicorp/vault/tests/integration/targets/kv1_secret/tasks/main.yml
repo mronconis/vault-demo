@@ -1,0 +1,171 @@
+---
+- name: Run kv1_secret tests
+  collections:
+    - hashicorp.vault
+  module_defaults:
+    group/hashicorp.vault.vault:
+      url: "{{ vault_url }}"
+      namespace: "{{ vault_namespace }}"
+      auth_method: "token"
+      token: "{{ vault_token_from_setup_auth_token }}"
+      engine_mount_point: "{{ kv1_secret_engine_mount_point }}"
+  block:
+    # Create Secret
+    - name: Create secret (check mode)
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        data: "{{ initial_data }}"
+      register: create_check_mode
+      check_mode: true
+
+    - name: Read secret
+      hashicorp.vault.kv1_secret_info:
+        path: "{{ secret_path }}"
+      register: secret_info
+
+    - name: Ensure the module reported change while the secret was not created
+      ansible.builtin.assert:
+        that:
+          - create_check_mode is changed
+          - create_check_mode.msg == "Would have created the secret if not in check mode."
+          - secret_info.secret == {}
+
+    - name: Create secret
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        data: "{{ initial_data }}"
+      register: create_result
+
+    - name: Read secret
+      hashicorp.vault.kv1_secret_info:
+        path: "{{ secret_path }}"
+      register: secret_info
+
+    - name: Ensure the secret exists and the module reported change
+      ansible.builtin.assert:
+        that:
+          - create_result is changed
+          - secret_info.secret.data == initial_data
+
+    - name: Create secret once again with same data (idempotency)
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        data: "{{ initial_data }}"
+      register: create_idempotency
+
+    - name: Ensure the module is idempotent
+      ansible.builtin.assert:
+        that:
+          - create_idempotency is not changed
+
+    # Update secret data
+    - name: Update secret with new data (check_mode)
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        data: "{{ updated_data }}"
+      register: update_secret_check_mode
+      check_mode: true
+
+    - name: Read secret
+      hashicorp.vault.kv1_secret_info:
+        path: "{{ secret_path }}"
+      register: secret_info
+
+    - name: Ensure the module reported change while the secret was not updated
+      ansible.builtin.assert:
+        that:
+          - update_secret_check_mode is changed
+          - update_secret_check_mode.msg == "Would have updated the secret if not in check mode."
+          - secret_info.secret.data == initial_data
+
+    - name: Update secret with new data
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        data: "{{ updated_data }}"
+      register: update_secret
+
+    - name: Read secret
+      hashicorp.vault.kv1_secret_info:
+        path: "{{ secret_path }}"
+      register: secret_info
+
+    - name: Ensure the module reported change and the secret was updated
+      ansible.builtin.assert:
+        that:
+          - update_secret is changed
+          - secret_info.secret.data == updated_data
+
+    - name: Update secret with same data than previous (idempotency)
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        data: "{{ updated_data }}"
+      register: update_secret_idempotency
+
+    - name: Read secret
+      hashicorp.vault.kv1_secret_info:
+        path: "{{ secret_path }}"
+      register: secret_info
+
+    - name: Ensure the module is idempotent for update
+      ansible.builtin.assert:
+        that:
+          - update_secret_idempotency is not changed
+          - secret_info.secret.data == updated_data
+
+    # Delete the secret (check mode)
+    - name: Delete the secret (check mode)
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        state: absent
+      register: delete_secret_check_mode
+      check_mode: true
+
+    - name: Read secret
+      hashicorp.vault.kv1_secret_info:
+        path: "{{ secret_path }}"
+      register: secret_info
+
+    - name: Ensure the module reported change while the secret was not deleted
+      ansible.builtin.assert:
+        that:
+          - delete_secret_check_mode is changed
+          - delete_secret_check_mode.msg == "Would have deleted the secret if not in check_mode."
+          - secret_info.secret != {}
+
+    - name: Delete the secret
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        state: absent
+      register: delete_secret
+
+    - name: Wait for the secret to be deleted
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Read secret
+      hashicorp.vault.kv1_secret_info:
+        path: "{{ secret_path }}"
+      register: secret_info
+
+    - name: Ensure the module reported change and the secret was updated
+      ansible.builtin.assert:
+        that:
+          - delete_secret is changed
+          - secret_info.secret == {}
+
+    - name: Delete the secret once again (idempotency)
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        state: absent
+      register: delete_secret_idempotency
+
+    - name: Ensure the module is idempotent for deletion
+      ansible.builtin.assert:
+        that:
+          - delete_secret_idempotency is not changed
+
+  always:
+    - name: Delete secret
+      hashicorp.vault.kv1_secret:
+        path: "{{ secret_path }}"
+        state: absent

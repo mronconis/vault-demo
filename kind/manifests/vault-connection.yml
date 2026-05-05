@@ -1,0 +1,9 @@
+---
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultConnection
+metadata:
+  name: vault-connection
+  namespace: vso-test
+spec:
+  address: "http://host.containers.internal:8200"
+  skipTLSVerify: true

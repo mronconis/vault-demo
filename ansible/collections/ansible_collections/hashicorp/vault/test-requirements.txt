@@ -1,0 +1,10 @@
+pytest
+pytest-mock
+pytest-ansible
+pytest-xdist
+requests
+psycopg[binary]
+cryptography
+# Linting and code formatting tools
+tox
+-r requirements-linters.txt

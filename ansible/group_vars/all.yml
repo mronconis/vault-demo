@@ -1,0 +1,14 @@
+vault_cluster_name: vault-cluster
+
+vault_cluster_iface_candidates:
+  - enp0s2
+  - enp0s3
+  - enp0s4
+  - enp0s5
+  - enp1s0
+  - eth1
+
+vault_data_dir: /opt/vault/data
+vault_config_dir: /etc/vault.d
+vault_api_port: 8200
+vault_cluster_port: 8201

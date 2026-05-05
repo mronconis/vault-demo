@@ -1,0 +1,220 @@
+---
+#
+# Play 1 — Initialise Vault and unseal the leader
+#
+- name: Initialise Vault and unseal leader
+  hosts: all
+  become: true
+  serial: "100%"
+  vars:
+    vault_addr: "http://127.0.0.1:{{ vault_api_port }}"
+    vault_key_shares: 3
+    vault_key_threshold: 2
+    vault_credentials_file: "{{ playbook_dir }}/../.vault-credentials.json"
+    vault_init_node: "{{ ansible_play_hosts[0] }}"
+
+  environment:
+    VAULT_ADDR: "{{ vault_addr }}"
+
+  tasks:
+
+    - name: Check Vault seal status
+      ansible.builtin.command: vault status -format=json
+      register: vault_status_raw
+      failed_when: false
+      changed_when: false
+
+    - name: Parse status
+      ansible.builtin.set_fact:
+        vault_initialized: "{{ (vault_status_raw.stdout | from_json).initialized | default(false) | bool }}"
+
+    - name: Initialise Vault
+      ansible.builtin.command: >-
+        vault operator init
+          -key-shares={{ vault_key_shares }}
+          -key-threshold={{ vault_key_threshold }}
+          -format=json
+      register: vault_init_raw
+      when:
+        - inventory_hostname == vault_init_node
+        - not vault_initialized
+      changed_when: vault_init_raw.rc == 0
+
+    - name: Save credentials to local file
+      ansible.builtin.copy:
+        content: >-
+          {{ {'unseal_keys': (vault_init_raw.stdout | from_json).unseal_keys_b64,
+              'root_token':  (vault_init_raw.stdout | from_json).root_token}
+             | to_nice_json }}
+        dest: "{{ vault_credentials_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when:
+        - inventory_hostname == vault_init_node
+        - vault_init_raw is changed
+
+    - name: Load credentials
+      ansible.builtin.slurp:
+        src: "{{ vault_credentials_file }}"
+      register: creds_raw
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Set credentials on all nodes
+      ansible.builtin.set_fact:
+        vault_unseal_keys: "{{ (creds_raw.content | b64decode | from_json).unseal_keys }}"
+        vault_root_token: "{{ (creds_raw.content | b64decode | from_json).root_token }}"
+
+    - name: Display credentials
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════
+          Vault initialised — credentials in {{ vault_credentials_file }}
+
+          Root token:  {{ vault_root_token }}
+          Unseal keys ({{ vault_key_threshold }}/{{ vault_key_shares }}):
+          {% for key in vault_unseal_keys %}
+            {{ loop.index }}. {{ key }}
+          {% endfor %}
+          ════════════════════════════════════════════════════
+      run_once: true
+      when: vault_init_raw is defined and vault_init_raw is changed
+
+    - name: Unseal leader
+      ansible.builtin.command: vault operator unseal {{ item }}
+      loop: "{{ vault_unseal_keys[:vault_key_threshold] }}"
+      when:
+        - inventory_hostname == vault_init_node
+        - (vault_status_raw.stdout | from_json).sealed | default(true)
+      no_log: true
+      changed_when: true
+
+    - name: Verify leader is unsealed
+      ansible.builtin.command: vault status -format=json
+      register: leader_check
+      when: inventory_hostname == vault_init_node
+      changed_when: false
+      failed_when: (leader_check.stdout | from_json).sealed | default(true)
+
+#
+# Play 2 — Unseal followers (with retry for Raft sync)
+#
+- name: Unseal follower nodes
+  hosts: all
+  become: true
+  vars:
+    vault_addr: "http://127.0.0.1:{{ vault_api_port }}"
+    vault_credentials_file: "{{ playbook_dir }}/../.vault-credentials.json"
+    vault_key_threshold: 2
+
+  environment:
+    VAULT_ADDR: "{{ vault_addr }}"
+
+  tasks:
+
+    - name: Load credentials
+      ansible.builtin.slurp:
+        src: "{{ vault_credentials_file }}"
+      register: creds_raw
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Set credentials
+      ansible.builtin.set_fact:
+        vault_unseal_keys: "{{ (creds_raw.content | b64decode | from_json).unseal_keys }}"
+        vault_root_token: "{{ (creds_raw.content | b64decode | from_json).root_token }}"
+
+    - name: Wait for Raft join (followers become initialized)
+      ansible.builtin.command: vault status -format=json
+      register: join_check
+      failed_when: false
+      changed_when: false
+      until: (join_check.stdout | from_json).initialized | default(false)
+      retries: 12
+      delay: 5
+
+    - name: Unseal and verify (with retry for Raft resync)
+      ansible.builtin.shell: |
+        for key in {{ vault_unseal_keys[:vault_key_threshold] | join(' ') }}; do
+          vault operator unseal "$key" > /dev/null 2>&1
+        done
+        vault status -format=json
+      register: unseal_loop
+      changed_when: false
+      failed_when: false
+      until: not ((unseal_loop.stdout | default('{}')) | from_json).sealed | default(true)
+      retries: 6
+      delay: 5
+      when: (join_check.stdout | from_json).sealed | default(true)
+
+    # ── Verify cluster ──────────────────────────────────────────
+
+    - name: Final status
+      ansible.builtin.command: vault status -format=json
+      register: final_raw
+      changed_when: false
+
+    - name: Show node status
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          sealed={{ (final_raw.stdout | from_json).sealed }},
+          version={{ (final_raw.stdout | from_json).version }}
+
+    - name: List Raft peers
+      ansible.builtin.command: vault operator raft list-peers -format=json
+      environment:
+        VAULT_TOKEN: "{{ vault_root_token }}"
+      register: raft_raw
+      run_once: true
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: raft_raw.rc == 0
+
+    - name: Show cluster members
+      ansible.builtin.debug:
+        msg: >-
+          Raft peers:
+          {{ (raft_raw.stdout | from_json).data.config.servers
+             | map(attribute='node_id') | list }}
+      run_once: true
+
+#
+# Play 3 — Enable KV2 secrets engine
+#
+- name: Configure Vault secrets engine
+  hosts: all
+  become: true
+  run_once: true
+  vars:
+    vault_addr: "http://{{ hostvars[ansible_play_hosts[0]].vault_node_ip }}:{{ vault_api_port }}"
+    vault_credentials_file: "{{ playbook_dir }}/../.vault-credentials.json"
+
+  tasks:
+
+    - name: Load credentials
+      ansible.builtin.slurp:
+        src: "{{ vault_credentials_file }}"
+      register: creds_raw
+      delegate_to: localhost
+      become: false
+
+    - name: Set root token
+      ansible.builtin.set_fact:
+        vault_root_token: "{{ (creds_raw.content | b64decode | from_json).root_token }}"
+
+    - name: Enable KV2 secrets engine
+      ansible.builtin.command: >-
+        vault secrets enable -path=secret -version=2 kv
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_TOKEN: "{{ vault_root_token }}"
+      register: kv2_enable
+      changed_when: kv2_enable.rc == 0
+      failed_when:
+        - kv2_enable.rc != 0
+        - "'already in use' not in kv2_enable.stderr"

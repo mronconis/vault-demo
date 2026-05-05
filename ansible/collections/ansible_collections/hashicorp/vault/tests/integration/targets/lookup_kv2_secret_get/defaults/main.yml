@@ -1,0 +1,7 @@
+---
+secret_mount_path: "kv-integration-tests"
+test_secret_path: "integration-test-secret-{{ vault_resource_suffix }}"
+# Test data that will be written to Vault for testing
+test_secret_data:
+  - foo: bar
+  - hello: world

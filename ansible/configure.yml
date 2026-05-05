@@ -1,0 +1,201 @@
+---
+#
+# Configure Vault using the hashicorp.vault Red Hat certified collection.
+#
+# This playbook manages ACL policies, secrets, and auth methods.
+# Prerequisites: Vault cluster initialised, unsealed, and KV2 enabled (initialize.yml).
+#
+# Usage:
+#   make configure
+#
+- name: Configure Vault (hashicorp.vault collection)
+  hosts: all
+  run_once: true
+  become: true
+  vars:
+    vault_addr: "http://127.0.0.1:{{ vault_api_port }}"
+    vault_credentials_file: "{{ playbook_dir }}/../.vault-credentials.json"
+
+  collections:
+    - hashicorp.vault
+
+  tasks:
+
+    - name: Install requests library on target
+      ansible.builtin.apt:
+        name: python3-requests
+        state: present
+
+    - name: Load credentials
+      ansible.builtin.slurp:
+        src: "{{ vault_credentials_file }}"
+      register: creds_raw
+      delegate_to: localhost
+      become: false
+
+    - name: Set root token
+      ansible.builtin.set_fact:
+        vault_root_token: "{{ (creds_raw.content | b64decode | from_json).root_token }}"
+
+    - name: Create default read-only policy
+      hashicorp.vault.acl_policy:
+        name: read-secret
+        policy: |
+          path "secret/data/*" {
+            capabilities = ["read", "list"]
+          }
+          path "secret/metadata/*" {
+            capabilities = ["read", "list"]
+          }
+        url: "{{ vault_addr }}"
+        token: "{{ vault_root_token }}"
+
+    - name: Write verification secret
+      hashicorp.vault.kv2_secret:
+        path: test/verification
+        data:
+          created_by: ansible
+          purpose: collection-integration-test
+        engine_mount_point: secret
+        url: "{{ vault_addr }}"
+        token: "{{ vault_root_token }}"
+
+    - name: Read verification secret
+      hashicorp.vault.kv2_secret_info:
+        path: test/verification
+        engine_mount_point: secret
+        url: "{{ vault_addr }}"
+        token: "{{ vault_root_token }}"
+      register: verify_secret
+
+    - name: Confirm collection integration
+      ansible.builtin.debug:
+        msg: >-
+          hashicorp.vault collection working —
+          secret 'test/verification' read successfully
+          (created_by={{ verify_secret.secret.data.data.created_by }})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kubernetes auth method (for VSO integration)
+#
+# This play configures the Vault kubernetes auth backend so that workloads
+# in the Kind cluster can authenticate and read secrets.
+# It is skipped automatically when no Kind cluster is running.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Configure Vault Kubernetes auth for VSO
+  hosts: all
+  run_once: true
+  become: false
+  vars:
+    vault_addr: "http://127.0.0.1:{{ vault_api_port }}"
+    vault_credentials_file: "{{ playbook_dir }}/../.vault-credentials.json"
+    kind_cluster_name: vault-vso-test
+    k8s_auth_role: vso-test
+    vso_namespace: vso-test
+    vso_service_account: default
+
+  tasks:
+
+    - name: Check if Kind cluster is available
+      ansible.builtin.command:
+        cmd: "kubectl cluster-info --context kind-{{ kind_cluster_name }}"
+      delegate_to: localhost
+      register: kind_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Skip Kubernetes auth configuration (no Kind cluster)
+      ansible.builtin.debug:
+        msg: "Kind cluster '{{ kind_cluster_name }}' not found — skipping Kubernetes auth configuration"
+      when: kind_check.rc != 0
+
+    - name: End play if no Kind cluster
+      ansible.builtin.meta: end_play
+      when: kind_check.rc != 0
+
+    - name: Load credentials
+      ansible.builtin.slurp:
+        src: "{{ vault_credentials_file }}"
+      register: creds_raw
+      delegate_to: localhost
+
+    - name: Set root token
+      ansible.builtin.set_fact:
+        vault_root_token: "{{ (creds_raw.content | b64decode | from_json).root_token }}"
+
+    - name: Get Kind cluster CA certificate
+      ansible.builtin.shell:
+        cmd: >
+          kubectl config view --raw
+          -o jsonpath='{.clusters[?(@.name=="kind-{{ kind_cluster_name }}")].cluster.certificate-authority-data}'
+          | base64 -d
+      delegate_to: localhost
+      register: k8s_ca
+      changed_when: false
+
+    - name: Create reviewer JWT for vault-auth service account
+      ansible.builtin.command:
+        cmd: "kubectl create token vault-auth -n {{ vso_namespace }} --duration=87600h"
+      delegate_to: localhost
+      register: reviewer_jwt
+      changed_when: false
+
+    - name: Get Kind API server port
+      ansible.builtin.shell:
+        cmd: >
+          kubectl cluster-info --context kind-{{ kind_cluster_name }} 2>/dev/null
+          | grep -oE '127\.0\.0\.1:[0-9]+' | head -1 | cut -d: -f2
+      delegate_to: localhost
+      register: k8s_api_port
+      changed_when: false
+
+    - name: Enable kubernetes auth method
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/sys/auth/kubernetes"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          type: kubernetes
+        status_code: [200, 204, 400]
+      register: enable_auth
+      changed_when: enable_auth.status != 400
+
+    - name: Configure kubernetes auth backend
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/auth/kubernetes/config"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          kubernetes_host: "https://127.0.0.1:6443"
+          kubernetes_ca_cert: "{{ k8s_ca.stdout }}"
+          token_reviewer_jwt: "{{ reviewer_jwt.stdout }}"
+          disable_local_ca_jwt: true
+        status_code: [200, 204]
+
+    - name: Create VSO auth role
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/auth/kubernetes/role/{{ k8s_auth_role }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          bound_service_account_names:
+            - "{{ vso_service_account }}"
+          bound_service_account_namespaces:
+            - "{{ vso_namespace }}"
+          policies:
+            - read-secret
+          ttl: "1h"
+        status_code: [200, 204]
+
+    - name: Confirm Kubernetes auth configured
+      ansible.builtin.debug:
+        msg: >-
+          Vault Kubernetes auth configured —
+          role '{{ k8s_auth_role }}' bound to SA '{{ vso_service_account }}'
+          in namespace '{{ vso_namespace }}' with policy 'read-secret'

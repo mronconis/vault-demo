@@ -1,0 +1,35 @@
+{
+ "collection_info": {
+  "namespace": "hashicorp",
+  "name": "vault",
+  "version": "2.0.0-dev",
+  "authors": [
+   "Ansible (https://github.com/ansible)"
+  ],
+  "readme": "README.md",
+  "tags": [
+   "hashicorp",
+   "vault",
+   "security",
+   "infrastructure"
+  ],
+  "description": "An Ansible Collection for managing HashiCorp Vault.",
+  "license": [],
+  "license_file": "LICENSE",
+  "dependencies": {
+   "ansible.utils": "*"
+  },
+  "repository": "https://github.com/ansible-collections/hashicorp.vault",
+  "documentation": null,
+  "homepage": "http://ansible.com/",
+  "issues": "https://access.redhat.com/support/"
+ },
+ "file_manifest_file": {
+  "name": "FILES.json",
+  "ftype": "file",
+  "chksum_type": "sha256",
+  "chksum_sha256": "6951305c864272ac1675db692af32c6cfec4d80103257f11ff1dc0c026d0bb95",
+  "format": 1
+ },
+ "format": 1
+}

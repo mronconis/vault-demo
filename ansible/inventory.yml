@@ -1,0 +1,23 @@
+all:
+  children:
+    vault:
+      vars:
+        ansible_user: vagrant
+        ansible_host: 127.0.0.1
+        ansible_ssh_private_key_file: "{{ playbook_dir }}/../.vagrant/machines/{{ inventory_hostname }}/qemu/private_key"
+      hosts:
+        vault-1:
+          vault_node_ip: 10.0.10.11
+          vault_ssh_port: 50022
+          ansible_port: 50022
+          vault_mac: "52:54:00:aa:00:01"
+        vault-2:
+          vault_node_ip: 10.0.10.12
+          vault_ssh_port: 50023
+          ansible_port: 50023
+          vault_mac: "52:54:00:aa:00:02"
+        vault-3:
+          vault_node_ip: 10.0.10.13
+          vault_ssh_port: 50024
+          ansible_port: 50024
+          vault_mac: "52:54:00:aa:00:03"

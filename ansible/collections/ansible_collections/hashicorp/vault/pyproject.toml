@@ -1,0 +1,20 @@
+[tool.black]
+line-length = 120
+fast = true
+skip-string-normalization = true
+force-exclude = '''
+(
+  .*/migrations/
+  | .*/__pycache__/
+  | .tox/
+  | .pytest_cache/
+  | build/
+  | dist/
+  | .*\.egg-info/
+)
+'''
+
+[tool.pytest.ini_options]
+addopts = ["-vvv", "-n", "2", "--log-level", "WARNING", "--color", "yes"]
+filterwarnings = ['ignore:AnsibleCollectionFinder has already been configured']
+testpaths = ["tests"]

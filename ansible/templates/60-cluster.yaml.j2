@@ -1,0 +1,6 @@
+network:
+  version: 2
+  ethernets:
+    {{ vault_cluster_iface }}:
+      addresses:
+        - {{ vault_node_ip }}/24

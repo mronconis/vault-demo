@@ -1,0 +1,119 @@
+---
+- name: Deploy HashiCorp Vault HA cluster
+  hosts: all
+  become: true
+  handlers:
+    - name: Restart Vault
+      ansible.builtin.systemd:
+        name: vault
+        state: restarted
+
+  tasks:
+
+    # ── Build cluster topology ────────────────────────────────────
+    - name: Build vault_nodes from inventory
+      ansible.builtin.set_fact:
+        vault_nodes: "{{ _nodes }}"
+      vars:
+        _nodes: >-
+          [{% for h in groups['vault'] %}
+          {"name":"{{ h }}","ip":"{{ hostvars[h].vault_node_ip }}"}{% if not loop.last %},{% endif %}
+          {% endfor %}]
+      run_once: true
+
+    # ── Network ───────────────────────────────────────────────────
+    - name: Detect cluster network interface
+      ansible.builtin.shell: |
+        for dev in {{ vault_cluster_iface_candidates | join(' ') }}; do
+          if [ -d "/sys/class/net/$dev" ]; then
+            echo "$dev"
+            exit 0
+          fi
+        done
+        exit 1
+      register: detected_iface
+      changed_when: false
+      failed_when: detected_iface.rc != 0
+
+    - name: Set cluster interface fact
+      ansible.builtin.set_fact:
+        vault_cluster_iface: "{{ detected_iface.stdout | trim }}"
+
+    - name: Deploy cluster netplan config
+      ansible.builtin.template:
+        src: 60-cluster.yaml.j2
+        dest: /etc/netplan/60-cluster.yaml
+        mode: "0600"
+      register: netplan_config
+
+    - name: Apply netplan
+      ansible.builtin.command: netplan apply
+      when: netplan_config.changed
+
+    # ── Install ───────────────────────────────────────────────────
+    - name: Install prerequisites
+      ansible.builtin.apt:
+        name:
+          - gpg
+          - lsb-release
+        state: present
+        update_cache: true
+
+    - name: Add HashiCorp GPG key
+      ansible.builtin.shell: |
+        curl -fsSL https://apt.releases.hashicorp.com/gpg \
+          | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+    - name: Get Ubuntu codename
+      ansible.builtin.command: lsb_release -cs
+      register: ubuntu_codename
+      changed_when: false
+
+    - name: Add HashiCorp APT repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg]
+          https://apt.releases.hashicorp.com {{ ubuntu_codename.stdout }} main
+        filename: hashicorp
+        state: present
+
+    - name: Install Vault
+      ansible.builtin.apt:
+        name: vault
+        state: present
+        update_cache: true
+
+    - name: Print Vault version
+      ansible.builtin.command: vault --version
+      register: vault_version
+      changed_when: false
+
+    - name: Show Vault version
+      ansible.builtin.debug:
+        msg: "{{ vault_version.stdout }}"
+
+    # ── Configure ─────────────────────────────────────────────────
+    - name: Create Vault data directory
+      ansible.builtin.file:
+        path: "{{ vault_data_dir }}"
+        state: directory
+        owner: vault
+        group: vault
+        mode: "0750"
+
+    - name: Deploy Vault configuration
+      ansible.builtin.template:
+        src: vault.hcl.j2
+        dest: "{{ vault_config_dir }}/vault.hcl"
+        owner: vault
+        group: vault
+        mode: "0640"
+      notify: Restart Vault
+
+    - name: Enable and start Vault
+      ansible.builtin.systemd:
+        name: vault
+        enabled: true
+        state: started
