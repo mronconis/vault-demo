@@ -1,14 +1,17 @@
 ---
 #
-# Configure Vault using the hashicorp.vault Red Hat certified collection.
+# Configure Vault resources required by the Vault Secrets Operator (VSO).
 #
-# This playbook manages ACL policies, secrets, and auth methods.
+# This playbook creates ACL policies and sets up Kubernetes auth so that
+# VSO workloads in the Kind cluster can authenticate and read secrets.
+# Secrets themselves are managed separately by secrets.yml.
+#
 # Prerequisites: Vault cluster initialised, unsealed, and KV2 enabled (initialize.yml).
 #
 # Usage:
 #   make configure
 #
-- name: Configure Vault (hashicorp.vault collection)
+- name: Configure Vault ACL policies for VSO
   hosts: all
   run_once: true
   become: true
@@ -49,31 +52,6 @@
           }
         url: "{{ vault_addr }}"
         token: "{{ vault_root_token }}"
-
-    - name: Write verification secret
-      hashicorp.vault.kv2_secret:
-        path: test/verification
-        data:
-          created_by: ansible
-          purpose: collection-integration-test
-        engine_mount_point: secret
-        url: "{{ vault_addr }}"
-        token: "{{ vault_root_token }}"
-
-    - name: Read verification secret
-      hashicorp.vault.kv2_secret_info:
-        path: test/verification
-        engine_mount_point: secret
-        url: "{{ vault_addr }}"
-        token: "{{ vault_root_token }}"
-      register: verify_secret
-
-    - name: Confirm collection integration
-      ansible.builtin.debug:
-        msg: >-
-          hashicorp.vault collection working —
-          secret 'test/verification' read successfully
-          (created_by={{ verify_secret.secret.data.data.created_by }})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Kubernetes auth method (for VSO integration)

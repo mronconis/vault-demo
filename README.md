@@ -67,9 +67,6 @@ make up
 
 # Initialise, unseal, and enable KV2 secrets engine
 make init
-
-# Configure Vault policies and secrets via the hashicorp.vault collection
-make configure
 ```
 
 The init playbook will:
@@ -107,19 +104,6 @@ done
 | `503` | Sealed |
 | `501` | Not initialized |
 
-### Manual alternative
-
-If you prefer to initialise manually:
-
-```bash
-vagrant ssh vault-1
-export VAULT_ADDR='http://127.0.0.1:8200'
-vault operator init -key-shares=1 -key-threshold=1
-
-# Then unseal each node with the printed key
-vault operator unseal <UNSEAL_KEY>
-```
-
 ## Web UI
 
 The Vault UI is enabled on all nodes. Since the QEMU provider does not expose VM ports directly on the host, open an SSH tunnel:
@@ -145,6 +129,7 @@ The project uses a `Makefile` to orchestrate the entire workflow, keeping the Va
 | `make provision` | Re-run Ansible setup on existing VMs |
 | `make init` | Initialise and unseal the Vault cluster |
 | `make configure` | Configure Vault (policies, secrets, k8s auth) via collection |
+| `make secrets` | Reconcile secrets on Vault (write defined, remove orphans) |
 | `make ssh-tunnel` | Open SSH tunnel to Vault API (port 8200) |
 | `make clean` | Full cleanup (VMs + venv + credentials + collections) |
 | `make status` | Show VM status |
@@ -165,6 +150,7 @@ The project uses a `Makefile` to orchestrate the entire workflow, keeping the Va
 
 ```
 .
+├── .vault-pass                          # Ansible Vault password (git-ignored)
 ├── Makefile                             # Orchestrates setup, VDE, and playbook execution
 ├── Vagrantfile                          # Reads inventory.yml, defines VMs
 ├── ansible.cfg                          # Ansible settings (pipelining, no host key check)
@@ -174,11 +160,15 @@ The project uses a `Makefile` to orchestrate the entire workflow, keeping the Va
 │   ├── inventory.yml                    # Single source of truth: node IPs, ports, MACs, SSH
 │   ├── setup.yml                       # Provisioning: install + configure Vault
 │   ├── initialize.yml                  # Day-2: init, unseal, enable KV2
-│   ├── configure.yml                  # Vault management (policies, secrets, k8s auth)
+│   ├── configure.yml                  # VSO resources (ACL policies, k8s auth)
+│   ├── secrets.yml                    # Write secrets from Ansible Vault to HashiCorp Vault
 │   ├── collections/
 │   │   └── requirements.yml           # Ansible collection dependencies (hashicorp.vault)
 │   ├── group_vars/
-│   │   └── all.yml                     # Cluster-wide variables (ports, paths)
+│   │   ├── all.yml                     # Cluster-wide variables (ports, paths)
+│   │   └── vault/
+│   │       ├── secrets.yml             # Secret definitions (paths, engine, key mapping)
+│   │       └── sensitive.yml           # Sensitive values (ansible-vault encrypted)
 │   └── templates/
 │       ├── 60-cluster.yaml.j2          # Netplan template
 │       └── vault.hcl.j2               # Vault config template
@@ -280,6 +270,60 @@ Additionally, `configure.yml` uses `ansible.builtin.uri` to manage the Kubernete
 
 > **Note:** init, unseal, and secrets engine enablement are not covered by the collection and remain CLI-based.
 
+## Secrets Management
+
+The `secrets.yml` playbook **reconciles** secrets on HashiCorp Vault with the definitions in Ansible (single source of truth). Each secret declares a `state` field (`present` or `absent`) that controls whether it is created/updated or deleted. Sensitive values are encrypted with [Ansible Vault](https://docs.ansible.com/ansible/latest/vault_guide/index.html).
+
+### How it works
+
+| File | Encrypted | Content |
+|------|-----------|---------|
+| `ansible/group_vars/vault/sensitive.yml` | Yes | Flat dictionary of sensitive values (`vault_sensitive_data`) |
+| `ansible/group_vars/vault/secrets.yml` | No | Secret definitions: KV2 path, engine mount, and key mapping referencing `vault_sensitive_data` |
+
+Ansible auto-loads all files under `group_vars/vault/` for hosts in the `vault` inventory group. The playbook writes entries with `state: present` (default) and deletes entries with `state: absent`. To remove a secret from Vault, set its state to `absent` and run `make secrets`; once confirmed, the entry can be removed from the file.
+
+### Vault password
+
+The Ansible Vault password is stored in `.vault-pass` (git-ignored, `chmod 600`). The `Makefile` exports the `ANSIBLE_VAULT_PASSWORD_FILE` environment variable pointing to this file, so all `make` targets that need to decrypt `sensitive.yml` work automatically without interactive prompts.
+
+```bash
+# Create the password file (one-time)
+echo -n "changeme" > .vault-pass
+chmod 600 .vault-pass
+```
+
+### Initial setup
+
+```bash
+# Edit the sensitive values (before encryption)
+vim ansible/group_vars/vault/sensitive.yml
+
+# Encrypt the file (one-time)
+ansible-vault encrypt ansible/group_vars/vault/sensitive.yml
+
+# Define secret paths and key mapping (plaintext, safe to commit)
+vim ansible/group_vars/vault/secrets.yml
+```
+
+### Writing secrets
+
+```bash
+make secrets
+```
+
+### Editing encrypted values
+
+```bash
+ansible-vault edit ansible/group_vars/vault/sensitive.yml
+```
+
+### Adding a new secret
+
+1. Add the sensitive value to `ansible/group_vars/vault/sensitive.yml` (via `ansible-vault edit`)
+2. Add a new entry to `vault_secret_definitions` in `ansible/group_vars/vault/secrets.yml`
+3. Run `make secrets`
+
 ## Configuration
 
 ### Node inventory (`ansible/inventory.yml`)
@@ -325,6 +369,9 @@ make init
 # Configure Vault (policies, secrets)
 make configure
 
+# Write secrets to Vault from encrypted Ansible Vault values
+make secrets
+
 # Re-run provisioning without recreating VMs
 make provision
 
@@ -364,6 +411,7 @@ This setup is intended for **local development and testing only**:
 - The UI is enabled on all nodes
 - Default `key-shares=3 / key-threshold=2` (configurable in `initialize.yml`)
 - `.vault-credentials.json` stores unseal keys and root token in plaintext — **do not commit this file**
+- `.vault-pass` contains the Ansible Vault password in plaintext — **do not commit this file**
 
 For production deployments, refer to the [Vault Production Hardening Guide](https://developer.hashicorp.com/vault/tutorials/operations/production-hardening).
 

@@ -2,7 +2,9 @@ VENV_DIR  := $(CURDIR)/.venv
 VDE_SOCK  := /tmp/vault-cluster.sock
 ANSIBLE   := $(VENV_DIR)/bin/ansible-playbook
 
-.PHONY: up destroy provision init configure clean status ssh-tunnel
+export ANSIBLE_VAULT_PASSWORD_FILE := $(CURDIR)/.vault-pass
+
+.PHONY: up destroy provision init configure secrets encrypt decrypt clean status ssh-tunnel
 
 ## ── Main targets ────────────────────────────────────────────────
 
@@ -21,8 +23,17 @@ provision:  ## Re-run Ansible setup on existing VMs
 init:  ## Initialize and unseal Vault cluster
 	$(ANSIBLE) -i ansible/inventory.yml ansible/initialize.yml
 
-configure:  ## Configure Vault (policies, secrets, k8s auth) via collection
+configure:  ## Configure Vault resources for VSO (ACL policies, k8s auth)
 	$(ANSIBLE) -i ansible/inventory.yml ansible/configure.yml
+
+secrets:  ## Reconcile secrets on Vault (write defined, remove orphans)
+	$(ANSIBLE) -i ansible/inventory.yml ansible/secrets.yml $(VAULT_ARGS)
+
+encrypt:  ## Encrypt sensitive vars with Ansible Vault
+	$(VENV_DIR)/bin/ansible-vault encrypt ansible/group_vars/vault/sensitive.yml
+
+decrypt:  ## Decrypt sensitive vars with Ansible Vault
+	$(VENV_DIR)/bin/ansible-vault decrypt ansible/group_vars/vault/sensitive.yml
 
 status:  ## Show VM status
 	vagrant status

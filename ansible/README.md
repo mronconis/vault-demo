@@ -38,15 +38,13 @@ make init
 
 ### `configure.yml`
 
-Manages Vault configuration using the Red Hat certified `hashicorp.vault` collection. Run after `initialize.yml`.
+Configures Vault resources required by the Vault Secrets Operator (VSO). Secrets are managed separately by `secrets.yml`.
 
-**Play 1 — Core Vault configuration:**
+**Play 1 — ACL policies:**
 
 | Task | Module | Description |
 |------|--------|-------------|
-| Create ACL policy | `hashicorp.vault.acl_policy` | Creates `read-secret` policy (read/list on `secret/data/*`) |
-| Write verification secret | `hashicorp.vault.kv2_secret` | Writes `test/verification` to confirm KV2 works |
-| Read verification secret | `hashicorp.vault.kv2_secret_info` | Reads the secret back for validation |
+| Create ACL policy | `hashicorp.vault.acl_policy` | Creates `read-secret` policy (read/list on `secret/data/*` and `secret/metadata/*`) |
 
 **Play 2 — Kubernetes auth for VSO (conditional):**
 
@@ -62,7 +60,29 @@ Automatically configures the Vault Kubernetes auth backend when a Kind cluster i
 make configure
 ```
 
-> This playbook is where you add custom policies, secrets, auth methods, and any other Vault configuration managed via Ansible.
+### `secrets.yml`
+
+Reconciles secrets on HashiCorp Vault with Ansible definitions (single source of truth). Each secret entry declares its desired state.
+
+| Field | Description |
+|-------|-------------|
+| `path` | KV2 secret path (relative to engine mount) |
+| `engine_mount_point` | Secrets engine mount (default: `secret`) |
+| `state` | `present` (default) or `absent` |
+| `purge` | `true` to permanently destroy metadata + all versions (default: `false`) |
+| `data` | Key/value pairs (required when `state: present`) |
+
+| Action | Behaviour |
+|--------|-----------|
+| `state: present` | Creates or updates the secret |
+| `state: absent` | Soft-deletes the latest version |
+| `state: absent` + `purge: true` | Hard-deletes metadata and all versions |
+
+```bash
+make secrets
+```
+
+Sensitive values are stored in `group_vars/vault/sensitive.yml` (Ansible Vault encrypted). Secret definitions live in `group_vars/vault/secrets.yml` (plaintext, safe to commit).
 
 ## Directory Structure
 
@@ -70,12 +90,16 @@ make configure
 ansible/
 ├── setup.yml                  # VM provisioning playbook
 ├── initialize.yml             # Init, unseal, enable KV2
-├── configure.yml              # Vault management (policies, secrets, k8s auth)
+├── configure.yml              # VSO resources (ACL policies, k8s auth)
+├── secrets.yml                # Reconcile secrets (write, soft-delete, purge)
 ├── inventory.yml              # Cluster topology (IPs, SSH ports, MACs, connection vars)
 ├── collections/
 │   └── requirements.yml       # Ansible collection dependencies
 ├── group_vars/
-│   └── all.yml                # Cluster-wide variables
+│   ├── all.yml                # Cluster-wide variables
+│   └── vault/
+│       ├── secrets.yml        # Secret definitions (paths, engine, key mapping)
+│       └── sensitive.yml      # Sensitive values (ansible-vault encrypted)
 └── templates/
     ├── 60-cluster.yaml.j2     # Netplan template (static IP on cluster interface)
     └── vault.hcl.j2           # Vault server configuration template
@@ -101,7 +125,9 @@ all:
           vault_mac: "52:54:00:aa:00:01"
 ```
 
-## Variables (`group_vars/all.yml`)
+## Variables
+
+### `group_vars/all.yml`
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -112,13 +138,21 @@ all:
 | `vault_api_port` | `8200` | HTTP API port |
 | `vault_cluster_port` | `8201` | Raft replication port |
 
+### `group_vars/vault/`
+
+| File | Encrypted | Content |
+|------|-----------|---------|
+| `sensitive.yml` | Yes | Flat dictionary of sensitive values (`vault_sensitive_data`) |
+| `secrets.yml` | No | Secret definitions: KV2 path, engine mount, state, and key mapping |
+
+Ansible auto-loads all files under `group_vars/vault/` for hosts in the `vault` inventory group.
+
 ## Ansible Collection
 
-The [`hashicorp.vault`](https://github.com/ansible-collections/hashicorp.vault) Red Hat certified collection is used in `configure.yml` for:
+The [`hashicorp.vault`](https://github.com/ansible-collections/hashicorp.vault) Red Hat certified collection is used in:
 
-- **`hashicorp.vault.acl_policy`** — creates a `read-secret` policy granting read/list on `secret/data/*`
-- **`hashicorp.vault.kv2_secret`** — writes a verification secret to confirm KV2 works
-- **`hashicorp.vault.kv2_secret_info`** — reads the secret back for validation
+- **`configure.yml`** — `hashicorp.vault.acl_policy` to create ACL policies
+- **`secrets.yml`** — `hashicorp.vault.kv2_secret` to write and soft-delete KV2 secrets
 
 ### Install the collection manually
 
@@ -160,6 +194,6 @@ After running `make init`, credentials are saved to `../.vault-credentials.json`
 ```
 
 This file is used by:
-- `initialize.yml` and `configure.yml`
+- `initialize.yml`, `configure.yml`, and `secrets.yml`
 - `test/create-secret.sh` and `test/read-secret.sh`
 - `kind/test-vso.sh`
